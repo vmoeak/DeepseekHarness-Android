@@ -10,6 +10,10 @@ import android.view.Display
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jackwener.dsh.core.data.SettingsRepository
 import io.github.jackwener.dsh.core.platform.ShizukuShell
+import io.github.jackwener.dsh.core.platform.AgentDisplayReport
+import io.github.jackwener.dsh.core.platform.AgentScreenDiagnostics
+import io.github.jackwener.dsh.core.platform.displayErrorDetails
+import kotlinx.coroutines.CancellationException
 import io.github.jackwener.dsh.service.DshAccessibilityService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,7 +71,8 @@ data class ScreenTarget(val displayId: Int, val agent: Boolean, val note: String
  * created through Shizuku on the first app_launch / app_open_link, released after 10 idle minutes
  * (and with the shell service, i.e. when DSH exits). Apps opened there are muted until they leave
  * it or the user opens them on the main screen. Without Shizuku, on Android 10 or with the setting
- * off, everything stays on the main screen.
+ * off, default requests use the main screen. Explicit agent requests fail when unavailable;
+ * a failed background-screen creation never falls back to the main screen.
  */
 @Singleton
 class AgentScreen @Inject constructor(
@@ -130,26 +135,43 @@ class AgentScreen @Inject constructor(
      * Resolves a tool's `screen` argument. [create]: app_launch / app_open_link may open the agent
      * screen; reads and gestures only use one that exists.
      */
-    suspend fun target(sessionId: String, screen: String?, create: Boolean = false): ScreenTarget {
+    suspend fun target(sessionId: String, screen: String?, create: Boolean = false): ScreenTarget =
+        requireRequestedScreen(screen, resolveTarget(sessionId, screen, create))
+
+    private suspend fun resolveTarget(sessionId: String, screen: String?, create: Boolean): ScreenTarget {
         if (screen == "main") return ScreenTarget(Display.DEFAULT_DISPLAY, false)
         // Turning the setting off also ends the agent screens that are open.
         if (current(sessionId) != null && !settings.current().agentScreen) release(sessionId)
         current(sessionId)?.let { touch(sessionId); return ScreenTarget(it, true) }
         if (!create) return ScreenTarget(Display.DEFAULT_DISPLAY, false,
-            if (screen == "agent") "There is no agent screen in this conversation yet (app_launch / app_open_link open one); this is the user's screen." else null)
+            if (screen == "agent") "There is no agent screen in this conversation yet (app_launch / app_open_link open one)." else null)
         val why = unavailableReason()
-            ?: return ensure(sessionId)?.let { ScreenTarget(it, true) }
-                ?: ScreenTarget(Display.DEFAULT_DISPLAY, false, "Working on the user's screen: the agent screen could not be created on this device.")
-        return ScreenTarget(Display.DEFAULT_DISPLAY, false, "Working on the user's own screen ($why).")
+            ?: return ScreenTarget(ensure(sessionId), true)
+        return ScreenTarget(Display.DEFAULT_DISPLAY, false,
+            if (screen == "agent") "Agent screen unavailable: $why." else "Working on the user's own screen ($why).")
     }
 
-    private suspend fun ensure(sessionId: String): Int? = mutex.withLock {
+    private suspend fun ensure(sessionId: String): Int = mutex.withLock {
         current(sessionId)?.let { return it }
-        val m = DisplayMetrics().also {
-            @Suppress("DEPRECATION") context.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(it)
+        var stage = "client_metrics"
+        val report = try {
+            val m = DisplayMetrics().also {
+                @Suppress("DEPRECATION") context.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(it)
+            }
+            stage = "shell_service_or_decode"
+            withContext(Dispatchers.IO) {
+                AgentDisplayReport.decode(shizuku.service().createDisplayWithDiagnostics(m.widthPixels, m.heightPixels, m.densityDpi))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val detail = "stage=$stage: ${displayErrorDetails(e)}"
+            AgentScreenDiagnostics.record(context, detail)
+            throw AgentScreenUnavailableException(detail)
         }
-        val id = runCatching { withContext(Dispatchers.IO) { shizuku.service().createDisplay(m.widthPixels, m.heightPixels, m.densityDpi) } }
-            .onFailure { Log.w(TAG, "createDisplay failed", it) }.getOrNull()?.takeIf { it >= 0 } ?: return null
+        AgentScreenDiagnostics.record(context, report.describe())
+        if (!report.created) throw AgentScreenUnavailableException(report.describe())
+        val id = report.displayId
         slots[key(sessionId)] = Slot(id)
         publish()
         id

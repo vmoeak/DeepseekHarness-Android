@@ -22,7 +22,8 @@
 
 - **自动建屏**：Shizuku 可用且设置“在后台屏操作 App”开着（默认开）时，会话里第一次 `app_launch` / `app_open_link` 就在后台屏打开。之后这个会话的 `screen_*` 默认作用于后台屏。会话空闲 10 分钟或 App 退出时释放。
 - **模型只看到两个屏**：工具参数 `screen: "agent" | "main"`，默认 agent（有后台屏时）。需要用户当前屏的内容（“这个怎么回”）用 `main`。
-- **没有 Shizuku**：退回主屏操作，`app_launch` 结果里明确写“在你的屏幕上操作”。设置页给一键引导装 Shizuku。
+- **没有 Shizuku**：未指定屏幕时可退回主屏，结果明确写“在你的屏幕上操作”；显式指定 `screen=agent` 时返回 `agent_screen_unavailable`，不启动、读取或操作主屏。设置页给一键引导装 Shizuku。
+- **创建失败**：已选择后台屏而创建失败时停止操作，不自动转主屏。adb UserService 使用属于 shell UID 的 `com.android.shell` Context 创建显示屏；通过 AIDL 返回创建阶段、实际服务 UID/PID、Context 包名、每组 flags 的异常及原因链，保存到 App 的 `logs/agent-screen.log`。只读工具 `shizuku_diagnose` 返回客户端身份、实时服务身份和日志，不通过修改系统设置试探授权。
 - **建屏参数**（Shizuku 侧，shell 身份）：
   - 基础：`PUBLIC | OWN_CONTENT_ONLY | SUPPORTS_TOUCH | ROTATES_WITH_CONTENT | DESTROY_CONTENT_ON_REMOVAL`
   - Android 13+：`TRUSTED | OWN_DISPLAY_GROUP | ALWAYS_UNLOCKED | TOUCH_FEEDBACK_DISABLED`
@@ -128,5 +129,6 @@ App 侧按会话统计，提醒文字附在工具结果后面，到上限时拒�
 6. 一个自绘界面的 App（如某游戏或 Flutter App）：读屏走文字识别，能按 t 编号点击。
 7. 打开微信（或任一有知识的 App）：第一次进入时结果里附了知识。
 8. 连续“发送”三次：第二、三次前有 8–20 秒间隔。
-9. 不装 Shizuku：退回主屏操作，结果写明。
+9. 不装 Shizuku：默认屏幕请求可退回主屏，结果写明；显式 `screen=agent` 请求报错停止。
+10. 模拟后台屏创建失败：`app_launch`、读屏和手势的显式 `screen=agent` 请求均不操作主屏；`shizuku_diagnose` 能读取失败阶段和服务身份。
 10. 悬浮球：干活中 / 需要你两种状态；双击把当前屏发进对话。

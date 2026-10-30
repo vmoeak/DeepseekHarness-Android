@@ -295,6 +295,8 @@ class CapabilityHub @Inject constructor(
             ToolResult.error("failed", "The step timed out internally (${e.message}); check the current state before retrying.")
         } catch (e: InvalidArgsException) {
             ToolResult.error("invalid_args", e.message ?: "invalid arguments")
+        } catch (e: AgentScreenUnavailableException) {
+            ToolResult.error("agent_screen_unavailable", e.message ?: "The agent screen is unavailable; no main-screen action was taken.")
         } catch (e: Exception) {
             Log.w(TAG, "tool $name failed", e)
             ToolResult.error("failed", "${e.javaClass.simpleName}: ${e.message}")

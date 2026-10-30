@@ -10,6 +10,7 @@ import android.media.ImageReader
 import android.os.Binder
 import android.os.Build
 import android.os.Looper
+import android.os.Process
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -59,23 +60,73 @@ class ShellUserService : IShellService.Stub() {
         return "${if (done) p.exitValue() else 124}\n${synchronized(out) { out.toString() }}"
     }
 
+    override fun createDisplay(width: Int, height: Int, dpi: Int): Int =
+        AgentDisplayReport.decode(createDisplayWithDiagnostics(width, height, dpi)).let { if (it.created) it.displayId else -1 }
+
+    override fun serviceIdentity(): String =
+        "serviceUid=${Process.myUid()}, servicePid=${Process.myPid()}, callerUid=${Binder.getCallingUid()}, sdk=${Build.VERSION.SDK_INT}"
+
     @SuppressLint("WrongConstant")
-    override fun createDisplay(width: Int, height: Int, dpi: Int): Int {
-        if (Looper.myLooper() == null) Looper.prepare()
-        val dm = SystemContext.get().getSystemService(DisplayManager::class.java)
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        // Newest flag set first; an older or stricter build that rejects it gets the previous one.
-        for (flags in displayFlags()) {
-            val vd = try { dm.createVirtualDisplay("dsh-agent", width, height, dpi, reader.surface, flags) } catch (t: Throwable) {
-                Log.w(TAG, "createVirtualDisplay(flags=0x${flags.toString(16)}) failed", t); null
-            } ?: continue
-            val id = vd.display.displayId
-            synchronized(displays) { displays[id] = Screen(vd, reader) }
-            setImePolicy(id)
-            return id
+    override fun createDisplayWithDiagnostics(width: Int, height: Int, dpi: Int): String {
+        val callerUid = Binder.getCallingUid()
+        val identity = Binder.clearCallingIdentity()
+        val uid = Process.myUid()
+        val attempts = mutableListOf<DisplayAttempt>()
+        var stage = "context"
+        var packageName = ""
+        var reader: ImageReader? = null
+        var owned: VirtualDisplay? = null
+        var registered = false
+        fun report(id: Int = -1, error: String? = null) = AgentDisplayReport.encode(AgentDisplayReport(
+            id, stage, uid, Process.myPid(), callerUid, packageName, error, attempts.toList(),
+        ))
+        try {
+            if (Looper.myLooper() == null) Looper.prepare()
+            val system = SystemContext.get()
+            val pkg = displayPackageForUid(uid)
+            // A System Context names "android" (uid 1000); adb services run as shell (uid 2000).
+            // DisplayManagerGlobal sends Context.getPackageName(), so use shell's package context.
+            val context = if (pkg == "android") system else system.createPackageContext(pkg, android.content.Context.CONTEXT_IGNORE_SECURITY)
+            packageName = context.packageName
+            check(uid == 0 || context.applicationInfo.uid == uid) { "Context package does not belong to service UID $uid" }
+            stage = "display_manager"
+            val dm = checkNotNull(context.getSystemService(DisplayManager::class.java)) { "DisplayManager unavailable" }
+            stage = "image_reader"
+            val imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+            reader = imageReader
+            stage = "create_virtual_display"
+            for (flags in displayFlags()) {
+                try {
+                    val vd = dm.createVirtualDisplay("dsh-agent", width, height, dpi, imageReader.surface, flags)
+                    if (vd == null) {
+                        attempts += DisplayAttempt(flags, "DisplayManager returned null")
+                        continue
+                    }
+                    owned = vd
+                    val id = vd.display.displayId
+                    check(id > 0) { "Invalid agent display ID: $id" }
+                    synchronized(displays) { displays[id] = Screen(vd, imageReader) }
+                    registered = true
+                    setImePolicy(id)
+                    stage = "created"
+                    return report(id)
+                } catch (e: Exception) {
+                    attempts += DisplayAttempt(flags, displayErrorDetails(e))
+                    Log.w(TAG, "createVirtualDisplay(flags=0x${flags.toString(16)}) failed", e)
+                    owned?.release(); owned = null
+                }
+            }
+            return report(error = "Every virtual display flag combination failed")
+        } catch (e: Exception) {
+            Log.w(TAG, "createDisplay failed at $stage", e)
+            return report(error = displayErrorDetails(e))
+        } finally {
+            if (!registered) {
+                runCatching { owned?.release() }
+                runCatching { reader?.close() }
+            }
+            Binder.restoreCallingIdentity(identity)
         }
-        reader.close()
-        return -1
     }
 
     override fun releaseDisplay(displayId: Int) {

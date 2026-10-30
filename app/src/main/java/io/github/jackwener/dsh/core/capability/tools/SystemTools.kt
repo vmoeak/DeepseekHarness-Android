@@ -34,6 +34,10 @@ import io.github.jackwener.dsh.core.capability.ShellUse
 import io.github.jackwener.dsh.core.platform.AppVisibility
 import io.github.jackwener.dsh.core.platform.Locator
 import io.github.jackwener.dsh.core.platform.ShellUnavailableException
+import io.github.jackwener.dsh.core.platform.AgentScreenDiagnostics
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -77,6 +81,30 @@ class SystemTools @Inject constructor(
     }
 
     override val tools = listOf(
+        object : Tool("shizuku_diagnose", ToolGroup.System, Risk.read, false,
+            "Read Shizuku client/manager status, the live privileged service UID/PID, and the latest agent-screen creation diagnostics. " +
+                "Does not write settings or open apps. Use after agent_screen_unavailable; do not use setting_put just to trigger authorization.", {}) {
+            override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val state = gate.access.refresh()
+                val local = buildString {
+                    appendLine("clientPackage=${context.packageName}, clientUid=${android.os.Process.myUid()}, clientPid=${android.os.Process.myPid()}")
+                    appendLine("clientAndroidUser=${android.os.Process.myUserHandle()}")
+                    appendLine("sdk=${android.os.Build.VERSION.SDK_INT}, managerVersion=${gate.access.managerVersion()}, state=${state.reason}")
+                    appendLine("frameworkShizukuPermissionGranted=${context.checkSelfPermission("moe.shizuku.manager.permission.API_V23") == android.content.pm.PackageManager.PERMISSION_GRANTED}")
+                    @Suppress("DEPRECATION")
+                    val info = context.packageManager.getPackageInfo(context.packageName,
+                        android.content.pm.PackageManager.GET_PERMISSIONS or android.content.pm.PackageManager.GET_META_DATA)
+                    appendLine("declaresShizukuPermission=${info.requestedPermissions?.contains("moe.shizuku.manager.permission.API_V23") == true}")
+                    appendLine("declaresV3Support=${info.applicationInfo?.metaData?.getBoolean("moe.shizuku.client.V3_SUPPORT", false)}")
+                }
+                val service = if (!state.ready) "Privileged service not queried: ${state.reason}" else try {
+                    withContext(Dispatchers.IO) { shizuku.service().serviceIdentity() }
+                } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    "Live service identity failed: ${e.javaClass.simpleName}: ${e.message}"
+                }
+                return ToolResult.text(local + service + "\nAgent-screen log:\n" + AgentScreenDiagnostics.tail(context))
+            }
+        },
         object : Tool("device_status", ToolGroup.System, Risk.read, false,
             "Battery, charging, network (Wi-Fi SSID if permitted), storage, ringer mode, volumes, Do-Not-Disturb, screen lock, time.", {}) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {

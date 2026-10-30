@@ -20,4 +20,8 @@ interface IShellService {
     boolean setAudioMuted(String pkg, boolean muted) = 8;
     /** Gives every app still muted by the ledger its previous PLAY_AUDIO mode back. */
     void restoreAudio() = 9;
+    /** JSON AgentDisplayReport, with service identity, failing stage and per-flag errors. */
+    String createDisplayWithDiagnostics(int width, int height, int dpi) = 10;
+    /** Read-only live service identity; does not change settings or create a display. */
+    String serviceIdentity() = 11;
 }
